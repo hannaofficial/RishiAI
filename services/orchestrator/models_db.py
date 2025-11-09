@@ -31,8 +31,9 @@ class Story(Base):
     user_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("users.id"))
     session_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("sessions.id"))
     story_json: Mapped[dict] = mapped_column(JSON)
-    citations_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    citations_json: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)  # <-- changed type hint
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=text("now()"))
+
 
 class Chat(Base):
     __tablename__ = "chats"

@@ -16,6 +16,7 @@ class StoryRequest(BaseModel):
     problem_text: str
     language: Lang = "en"
     sources: List[str] = ["auto"]
+    emotion_tags: Optional[List[str]] = None  # Added optional emotion_tags field
 
 class StoryPayload(BaseModel):
     title: str

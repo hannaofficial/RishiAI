@@ -10,7 +10,13 @@ if not DATABASE_URL:
     raise RuntimeError(f"DATABASE_URL is not set. Expected in {ENV_PATH}")
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True , future=True)
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+# AFTER ✅
+SessionLocal = sessionmaker(
+    bind=engine,
+    autoflush=False,
+    autocommit=False,
+    expire_on_commit=False,   
+)
 
 class Base(DeclarativeBase):
     pass

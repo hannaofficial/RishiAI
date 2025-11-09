@@ -1,6 +1,8 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from datetime import datetime
+import re
 
 from agents.lang_graph_story import run_story_pipeline
 from llm.adapter import generate_with_gemini
@@ -47,6 +49,36 @@ STYLE_NOTE = (
     "Simple English. Kind and calm. At most 2 gentle emojis. "
     "No medical or legal advice."
 )
+
+
+JSON_SNIP_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+def parse_llm_json(s: str) -> dict:
+    """Extract JSON from model text safely (handles code fences, prose)."""
+    if not s:
+        return {}
+    s = s.strip()
+    # strip triple backticks if present
+    if s.startswith("```"):
+        s = s.strip("`").strip()
+        # drop first line if it's 'json'
+        lines = s.splitlines()
+        if lines and lines[0].strip().lower() == "json":
+            s = "\n".join(lines[1:])
+    # try direct
+    try:
+        return json.loads(s)
+    except Exception:
+        pass
+    # try largest {...} block
+    m = JSON_SNIP_RE.search(s)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except Exception:
+            pass
+    return {}
+
 
 @app.get("/health")
 def health():
@@ -119,31 +151,49 @@ def create_story(req: StoryRequest, db: SASession = Depends(get_db)):
 from fastapi.responses import StreamingResponse
 import json, asyncio
 
+# add these imports near your other imports at the top of main.py
+from rag.retrieve import search_gita
+from llm.adapter import generate_with_gemini
+# make sure the file exists as agents/search_agents.py (plural) or adjust to agents.search_agent
+from agents.search_agents import web_search_agent  # async search via OpenRouter
+from agents.curator import curate_context 
+
 @app.post("/story/stream")
 async def story_stream(req: StoryRequest, db: SASession = Depends(get_db)):
     """
-    Streams progress to front-end (SSE) while agents build the story.
+    Streams progress to the frontend (SSE) while we build a curated story:
+    RAG (scriptures) -> Web Search (snippets) -> Curate -> Gemini -> Compose.
     """
 
+    # 1) Upsert user
     # ✅ Create user + session first
     user = db.get(User, req.user_id)
     if not user:
         user = User(id=req.user_id)
         db.add(user)
-        db.flush()
+        db.flush()                     # <-- generates user.id
         db.add(Totals(user_id=user.id, karmic_points=15))
+
+    # ✅ Cache scalar user_id BEFORE db commit
+    user_id = user.id
 
     emotion_tags = req.emotion_tags or ["anxiety", "overthinking"]
 
     sess = DBSession(
-        user_id=user.id,
+        user_id=user_id,
         problem_text=req.problem_text,
         emotion_tags=emotion_tags,
         last_stage="story",
     )
     db.add(sess)
-    db.flush()
+    db.flush()                          # <-- generates session.id
+
+    # ✅ Cache scalar session_id BEFORE db commit
     session_id = sess.id
+
+    db.commit()                         # <-- after commit, ORM objects become detached
+
+
 
     async def event_stream():
         async def send(stage: str, msg: str, extra: dict | None = None):
@@ -152,78 +202,85 @@ async def story_stream(req: StoryRequest, db: SASession = Depends(get_db)):
                 payload.update(extra)
             return f"data: {json.dumps(payload)}\n\n"
 
-        # ✅ Each step yields one event
+        # UX: staged updates
         yield await send("router", "🧠 Choosing a guide + scripture…")
         await asyncio.sleep(0.2)
 
+        # 3) RAG (scripture) first
         yield await send("rag", "🔎 Searching sacred texts (RAG)…")
+        hits = []
+        try:
+            hits = search_gita(req.problem_text, k=3)
+        except Exception:
+            hits = []
+
+        rag_context = ""
+        citations = []
+        if hits:
+            for h in hits[:3]:
+                md = (h.get("meta") or {})
+                work = md.get("work", "Bhagavad Gita")
+                ch, vs = md.get("chapter"), md.get("verse")
+                ref = f"{ch}.{vs}" if ch and vs else None
+                citations.append({"work": work, "ref": ref})
+                rag_context += f"- {h.get('doc','')}\n"
+
         await asyncio.sleep(0.2)
 
+        # 4) Web search (OpenRouter) — soft fail allowed
         yield await send("search", "🌐 Seeking more context…")
+        try:
+            web_results = await web_search_agent(req.problem_text)
+        except Exception:
+            web_results = []
 
-        from agents.search_agents import web_search_agent
-        from agents.curator import curate_context
+        await asyncio.sleep(0.2)
 
-        web_results = await web_search_agent(req.problem_text)
-
+        # 5) Curate RAG + web into one compact insight
         yield await send("curate", "✨ Curating the best wisdom from all sources…")
-        curated_context = await curate_context(rag_context, web_results)
+        try:
+            curated_context = await curate_context(rag_context, web_results)
+        except Exception:
+            curated_context = ""
 
+        await asyncio.sleep(0.2)
 
+        # 6) LLM (Gemini) — generate story JSON
         yield await send("llm", "✍️ Writing a story for your situation…")
 
-        # ✅ Run the actual pipeline
-                # ✅ Run RAG + Gemini inline (no external graph dependency)
         try:
-            # 1) RAG (Bhagavad Gita for now)
-            hits = []
-            try:
-                hits = search_gita(req.problem_text, k=3)
-            except Exception:
-                hits = []
-
-            rag_context = ""
-            citations = []
-            if hits:
-                for h in hits[:3]:
-                    md = (h.get("meta") or {})
-                    work = md.get("work", "Bhagavad Gita")
-                    ch, vs = md.get("chapter"), md.get("verse")
-                    ref = f"{ch}.{vs}" if ch and vs else None
-                    citations.append({"work": work, "ref": ref})
-                    rag_context += f"- {h.get('doc','')}\n"
-
-            # 2) Build a simple, emoji-friendly prompt for Gemini
             final_prompt = f"""
-                You are a kind ancient guide. Use simple English, non-judgmental tone, max 2 gentle emojis.
+You are a kind ancient guide. Use simple English, non-judgmental tone, max 2 gentle emojis.
 
-                User feels: {', '.join(emotion_tags)}
-                Problem:
-                {req.problem_text}
+User feels: {', '.join(emotion_tags)}
+Problem:
+{req.problem_text}
 
-                Relevant scripture/context (may be empty):
-                {rag_context or '(none)'}
+Relevant scripture/context (may be empty):
+{rag_context or '(none)'}
 
-                Write a short calming story (6–10 sentences) that offers one clear lesson.
-                Add 3 brief takeaways (one line each).
-                Return STRICT JSON only, in this shape:
-                {{
-                "title": "string",
-                "narration_text": "string",
-                "slides": [
-                    {{"image_prompt": "short visual description for the first scene"}},
-                    {{"image_prompt": "another short visual description"}}
-                ],
-                "takeaways": ["one", "two", "three"],
-                "citations": [{{"work":"string","ref":"optional"}}]
-                }}
-                """
+Relevant insights from the world (may be empty):
+{curated_context or '(none)'}
 
-            # 3) Call Gemini
+Write a short calming story (6–10 sentences) that offers one clear lesson.
+Add 3 brief takeaways (one line each).
+Return STRICT JSON only, in this shape:
+{{
+  "title": "string",
+  "narration_text": "string",
+  "slides": [
+    {{"image_prompt": "short visual description for the first scene"}},
+    {{"image_prompt": "another short visual description"}}
+  ],
+  "takeaways": ["one", "two", "three"],
+  "citations": [{{"work":"string","ref":"optional"}}]
+}}
+""".strip()
+
             model_json = generate_with_gemini(final_prompt).strip()
-
-            # 4) Parse JSON; normalize UI response
-            data = json.loads(model_json)
+            data = parse_llm_json(model_json)
+            if not data:
+                raise ValueError("Model did not return valid JSON")
 
             title = data.get("title") or "Do Your Part. Let Worry Be Light."
             narration_text = data.get("narration_text") or (
@@ -235,7 +292,6 @@ async def story_stream(req: StoryRequest, db: SASession = Depends(get_db)):
                 "Breathe slow before you act.",
                 "Let results be light.",
             ]
-
             model_citations = data.get("citations") or []
             final_citations = citations or model_citations or [{"work":"Bhagavad Gita","ref":"2.47"}]
 
@@ -246,6 +302,11 @@ async def story_stream(req: StoryRequest, db: SASession = Depends(get_db)):
                     "image_url": "/assets/kurukshetra_1.jpg" if i == 0 else "/assets/krishna_guides.jpg",
                     "caption": prompt[:120] or ("Scene " + str(i+1)),
                 })
+            if not slides:
+                slides = [
+                    {"image_url": "/assets/kurukshetra_1.jpg", "caption": "Arjuna feels fear on the battlefield."},
+                    {"image_url": "/assets/krishna_guides.jpg", "caption": "Krishna speaks with compassion."},
+                ]
 
             story_payload_dict = {
                 "title": title,
@@ -253,6 +314,7 @@ async def story_stream(req: StoryRequest, db: SASession = Depends(get_db)):
                 "narration_text": narration_text,
                 "takeaways": takeaways,
                 "citations": final_citations,
+                "bg_music_url": "/audio/bg.mp3",
             }
 
         except Exception as e:
@@ -273,27 +335,27 @@ async def story_stream(req: StoryRequest, db: SASession = Depends(get_db)):
                     "Let results be light.",
                 ],
                 "citations": [{"work": "Bhagavad Gita", "ref": "2.47"}],
+                "bg_music_url": "/audio/bg.mp3",
             }
 
-
-        story_payload_dict["bg_music_url"] = "/audio/bg.mp3"
-
-        # ✅ Save to DB
+        # 7) Persist story (FK now valid because we committed earlier)
         db.add(DBStory(
-            user_id=user.id,
-            session_id=session_id,
-            story_json=story_payload_dict,
-            citations_json=[c for c in story_payload_dict.get("citations", [])]
-        ))
+        user_id=user_id,
+        session_id=session_id,
+        story_json=story_payload_dict,
+        citations_json=[c for c in story_payload_dict.get("citations", [])]
+    ))
         db.commit()
 
-        # ✅ Final event
+        # 8) Final event
         yield await send("done", "✨ Story generated!", {
             "story_payload": story_payload_dict,
             "session_id": session_id,
         })
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
 
 
 

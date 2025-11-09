@@ -3,7 +3,7 @@ from langgraph.graph import StateGraph, START, END
 from .schemas import StoryState
 from .planner import plan_sources
 from .search_agents import plan_queries, web_search_stub
-from ..rag.retrieve import search_gita
+from rag.retrieve import search_gita
 from .prompts import STORY_SYSTEM, STORY_USER_TEMPLATE
 from .llm_adapter import llm_generate
 
