@@ -2,6 +2,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from agents.lang_graph_story import run_story_pipeline
+from llm.adapter import generate_with_gemini
+
+
 from models import (
     StoryRequest, StoryResponse, StoryPayload, Slide, Citation,
     StoryQARequest, StoryQAResponse,
@@ -11,7 +15,7 @@ from models import (
 from fastapi import Depends , Query
 from sqlalchemy.orm import Session as SASession
 from db import get_db
-from models_db import User, Session as DBSession, Story as DBStory, Totals
+from models_db import User, Session as DBSession, Story as DBStory, Totals, Chat as DBChat
 from rag.retrieve import search_gita
 
 from memory.user_memory import summarize_if_needed
@@ -50,7 +54,12 @@ def health():
 
 @app.post("/story", response_model=StoryResponse)
 def create_story(req: StoryRequest, db: SASession = Depends(get_db)):
-    # 1) Upsert user and award courage bonus on first sighting
+    """
+    Builds a story via the LangGraph pipeline:
+      Router (persona+sources) -> RAG -> (Search stub) -> LLM -> Compose
+    Persists user/session/story; returns story + session_id.
+    """
+    # 1) Upsert user + courage bonus (first-time)
     user = db.get(User, req.user_id)
     if not user:
         user = User(id=req.user_id)
@@ -58,71 +67,44 @@ def create_story(req: StoryRequest, db: SASession = Depends(get_db)):
         db.flush()
         db.add(Totals(user_id=user.id, karmic_points=15))  # courage bonus
 
-    # 2) Create a session (store emotion tags if provided)
+    # 2) Create a session (store emotion tags for persona/memory)
+    emotion_tags = (req.emotion_tags or ["anxiety", "overthinking"])
     sess = DBSession(
         user_id=user.id,
         problem_text=req.problem_text,
-        emotion_tags=(req.emotion_tags or ["anxiety", "overthinking"]),
+        emotion_tags=emotion_tags,
         last_stage="story",
     )
     db.add(sess); db.flush()
 
-    # 3) Try RAG (Gita) first
-    hits = []
+    # 3) Run the LangGraph story pipeline (sync endpoint -> run loop locally)
     try:
-        hits = search_gita(req.problem_text, k=3)
+        final_state = asyncio.run(run_story_pipeline(req.problem_text, emotion_tags))
+        story_payload_dict = final_state["story_payload"]
     except Exception:
-        hits = []
-
-    if hits:
-        # Use top hit’s citation
-        top = hits[0]["meta"] or {}
-        work = top.get("work", "Bhagavad Gita")
-        chapter = top.get("chapter")
-        verse = top.get("verse")
-        ref = f"{chapter}.{verse}" if chapter and verse else None
-
-        story_payload = StoryPayload(
-            title="Do Your Part. Let Worry Be Light.",
-            slides=[
-                Slide(image_url="/assets/kurukshetra_1.jpg", caption="Arjuna feels fear on the field."),
-                Slide(image_url="/assets/krishna_guides.jpg", caption="Krishna speaks with care."),
+        # ultra-safe fallback if the graph errors
+        story_payload_dict = {
+            "title": "Do Your Part. Let Worry Be Light.",
+            "slides": [
+                {"image_url": "/assets/kurukshetra_1.jpg", "caption": "Arjuna feels fear on the field."},
+                {"image_url": "/assets/krishna_guides.jpg", "caption": "Krishna speaks with care."},
             ],
-            narration_text=(
-                "This teaching is simple: do your action. Do not hold the result too tight. "
-                "Take one small step today. 💙"
-            ),
-            takeaways=[
-                "Do one tiny step today. 🌱",
-                "Breathe slow before you act.",
-                "Let results be light."
-            ],
-            citations=[Citation(work=work, ref=ref)]
-        )
-    else:
-        # 4) Fallback: your original friendly mock
-        story_payload = StoryPayload(
-            title="Do Your Part. Let Worry Be Light.",
-            slides=[
-                Slide(image_url="/assets/kurukshetra_1.jpg", caption="Arjuna feels fear on the field."),
-                Slide(image_url="/assets/krishna_guides.jpg", caption="Krishna speaks with care."),
-            ],
-            narration_text=(
+            "narration_text": (
                 "You feel heavy because you hold the result too tight. "
                 "Take one small action. Leave the outcome to time. 💙 "
                 "Your step today is enough."
             ),
-            takeaways=[
-                "Do one tiny step today. 🌱",
-                "Breathe slow before you act.",
-                "Let results be light."
-            ],
-            citations=[Citation(work="Bhagavad Gita", ref="2.47")]
-        )
+            "takeaways": ["Do one tiny step today. 🌱","Breathe slow before you act.","Let results be light."],
+            "citations": [{"work": "Bhagavad Gita", "ref": "2.47"}],
+        }
 
-    story_payload.bg_music_url = "/audio/bg.mp3"
+    # 4) Add bg music url (frontend optional)
+    story_payload_dict["bg_music_url"] = "/audio/bg.mp3"
 
-    # 5) Persist story record
+    # 5) Validate against pydantic model
+    story_payload = StoryPayload(**story_payload_dict)
+
+    # 6) Persist story record (for memory & guide/persona)
     db.add(DBStory(
         user_id=user.id,
         session_id=sess.id,
@@ -131,8 +113,190 @@ def create_story(req: StoryRequest, db: SASession = Depends(get_db)):
     ))
     db.commit()
 
-    # 6) Return story + session_id so /guide/chat can use it
+    # 7) Return story + session_id for /guide/chat
     return StoryResponse(story=story_payload, session_id=sess.id)
+
+from fastapi.responses import StreamingResponse
+import json, asyncio
+
+@app.post("/story/stream")
+async def story_stream(req: StoryRequest, db: SASession = Depends(get_db)):
+    """
+    Streams progress to front-end (SSE) while agents build the story.
+    """
+
+    # ✅ Create user + session first
+    user = db.get(User, req.user_id)
+    if not user:
+        user = User(id=req.user_id)
+        db.add(user)
+        db.flush()
+        db.add(Totals(user_id=user.id, karmic_points=15))
+
+    emotion_tags = req.emotion_tags or ["anxiety", "overthinking"]
+
+    sess = DBSession(
+        user_id=user.id,
+        problem_text=req.problem_text,
+        emotion_tags=emotion_tags,
+        last_stage="story",
+    )
+    db.add(sess)
+    db.flush()
+    session_id = sess.id
+
+    async def event_stream():
+        async def send(stage: str, msg: str, extra: dict | None = None):
+            payload = {"stage": stage, "msg": msg}
+            if extra:
+                payload.update(extra)
+            return f"data: {json.dumps(payload)}\n\n"
+
+        # ✅ Each step yields one event
+        yield await send("router", "🧠 Choosing a guide + scripture…")
+        await asyncio.sleep(0.2)
+
+        yield await send("rag", "🔎 Searching sacred texts (RAG)…")
+        await asyncio.sleep(0.2)
+
+        yield await send("search", "🌐 Seeking more context…")
+
+        from agents.search_agents import web_search_agent
+        from agents.curator import curate_context
+
+        web_results = await web_search_agent(req.problem_text)
+
+        yield await send("curate", "✨ Curating the best wisdom from all sources…")
+        curated_context = await curate_context(rag_context, web_results)
+
+
+        yield await send("llm", "✍️ Writing a story for your situation…")
+
+        # ✅ Run the actual pipeline
+                # ✅ Run RAG + Gemini inline (no external graph dependency)
+        try:
+            # 1) RAG (Bhagavad Gita for now)
+            hits = []
+            try:
+                hits = search_gita(req.problem_text, k=3)
+            except Exception:
+                hits = []
+
+            rag_context = ""
+            citations = []
+            if hits:
+                for h in hits[:3]:
+                    md = (h.get("meta") or {})
+                    work = md.get("work", "Bhagavad Gita")
+                    ch, vs = md.get("chapter"), md.get("verse")
+                    ref = f"{ch}.{vs}" if ch and vs else None
+                    citations.append({"work": work, "ref": ref})
+                    rag_context += f"- {h.get('doc','')}\n"
+
+            # 2) Build a simple, emoji-friendly prompt for Gemini
+            final_prompt = f"""
+                You are a kind ancient guide. Use simple English, non-judgmental tone, max 2 gentle emojis.
+
+                User feels: {', '.join(emotion_tags)}
+                Problem:
+                {req.problem_text}
+
+                Relevant scripture/context (may be empty):
+                {rag_context or '(none)'}
+
+                Write a short calming story (6–10 sentences) that offers one clear lesson.
+                Add 3 brief takeaways (one line each).
+                Return STRICT JSON only, in this shape:
+                {{
+                "title": "string",
+                "narration_text": "string",
+                "slides": [
+                    {{"image_prompt": "short visual description for the first scene"}},
+                    {{"image_prompt": "another short visual description"}}
+                ],
+                "takeaways": ["one", "two", "three"],
+                "citations": [{{"work":"string","ref":"optional"}}]
+                }}
+                """
+
+            # 3) Call Gemini
+            model_json = generate_with_gemini(final_prompt).strip()
+
+            # 4) Parse JSON; normalize UI response
+            data = json.loads(model_json)
+
+            title = data.get("title") or "Do Your Part. Let Worry Be Light."
+            narration_text = data.get("narration_text") or (
+                "You feel heavy because you hold the result too tight. "
+                "Take one kind step and let the outcome be light. 💙"
+            )
+            takeaways = data.get("takeaways") or [
+                "Do one tiny step today. 🌱",
+                "Breathe slow before you act.",
+                "Let results be light.",
+            ]
+
+            model_citations = data.get("citations") or []
+            final_citations = citations or model_citations or [{"work":"Bhagavad Gita","ref":"2.47"}]
+
+            slides = []
+            for i, s in enumerate(data.get("slides") or []):
+                prompt = (s or {}).get("image_prompt", "")
+                slides.append({
+                    "image_url": "/assets/kurukshetra_1.jpg" if i == 0 else "/assets/krishna_guides.jpg",
+                    "caption": prompt[:120] or ("Scene " + str(i+1)),
+                })
+
+            story_payload_dict = {
+                "title": title,
+                "slides": slides,
+                "narration_text": narration_text,
+                "takeaways": takeaways,
+                "citations": final_citations,
+            }
+
+        except Exception as e:
+            print("Gemini pipeline failed:", e)
+            story_payload_dict = {
+                "title": "Do Your Part. Let Worry Be Light.",
+                "slides": [
+                    {"image_url": "/assets/kurukshetra_1.jpg", "caption": "Arjuna feels fear on the battlefield."},
+                    {"image_url": "/assets/krishna_guides.jpg", "caption": "Krishna speaks with compassion."},
+                ],
+                "narration_text": (
+                    "You feel heavy because you are trying to control everything. "
+                    "Take one small action. Leave the results to time. 💙"
+                ),
+                "takeaways": [
+                    "Do one small step today. 🌱",
+                    "Breathe slow before you act.",
+                    "Let results be light.",
+                ],
+                "citations": [{"work": "Bhagavad Gita", "ref": "2.47"}],
+            }
+
+
+        story_payload_dict["bg_music_url"] = "/audio/bg.mp3"
+
+        # ✅ Save to DB
+        db.add(DBStory(
+            user_id=user.id,
+            session_id=session_id,
+            story_json=story_payload_dict,
+            citations_json=[c for c in story_payload_dict.get("citations", [])]
+        ))
+        db.commit()
+
+        # ✅ Final event
+        yield await send("done", "✨ Story generated!", {
+            "story_payload": story_payload_dict,
+            "session_id": session_id,
+        })
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+
 
 
 @app.post("/story/qa", response_model=StoryQAResponse)
@@ -310,6 +474,8 @@ def knowledge_plan(req: KnowledgePlanRequest):
 
 
 from pydantic import BaseModel, Field
+from tts.providers import get_provider, TTS_VOICE, TTS_SPEED, STATIC_DIR, _hash_name, DummyProvider
+import re, os
 
 class TTSRequest(BaseModel):
     text: str = Field(min_length=1, max_length=5000)
@@ -325,10 +491,6 @@ class TTSResponse(BaseModel):
     cached: bool
     provider: str
     size: int
-
-
-from tts.providers import get_provider, TTS_VOICE, TTS_SPEED, STATIC_DIR, _hash_name,  DummyProvider
-import re
 
 def normalize_speed(s: str | None, default: str = "+0%") -> str:
     if not s: s = default
@@ -356,18 +518,22 @@ async def tts(req: TTSRequest):
 
     if not cached:
         try:
+            print("[/tts] provider:", type(provider).__name__, "voice:", voice, "speed:", speed)
             result = await provider.synthesize(req.text, voice, speed, fmt)
             out_url = result.url
             size = os.path.getsize(out_path) if os.path.exists(out_path) else 0
+            print("[/tts] edge size:", size)
             if size < MIN_VALID_BYTES:
-                # fallback if provider produced tiny/bad file
                 raise RuntimeError("Produced tiny file; falling back to Dummy")
-        except Exception:
+        except Exception as e:
+            print("[/tts] provider failed:", repr(e))  # <—— see exact reason in console
             fallback = DummyProvider()
             result = await fallback.synthesize(req.text, voice, speed, fmt)
             out_url = result.url
             used_provider = type(fallback).__name__
             size = os.path.getsize(out_path) if os.path.exists(out_path) else 0
+            print("[/tts] fallback size:", size)
+
 
     return TTSResponse(
         audio_url=out_url,
@@ -378,3 +544,41 @@ async def tts(req: TTSRequest):
         provider=used_provider,
         size=size
     )
+
+@app.get("/tts/debug")
+def tts_debug():
+    folder = os.path.join(STATIC_DIR, "tts")
+    files = []
+    if os.path.isdir(folder):
+        for name in os.listdir(folder):
+            p = os.path.join(folder, name)
+            if os.path.isfile(p):
+                files.append({"name": name, "size": os.path.getsize(p)})
+    return {"files": files}
+
+
+@app.get("/tts/voices/local")
+def tts_voices_local():
+    try:
+        import pyttsx3
+        eng = pyttsx3.init()
+        out = []
+        for v in eng.getProperty("voices") or []:
+            out.append({"id": getattr(v, "id", None), "name": getattr(v, "name", None)})
+        try: eng.stop()
+        except: pass
+        return {"provider": "LocalTTSProvider", "voices": out}
+    except Exception as e:
+        return {"provider": "LocalTTSProvider", "error": repr(e)}
+
+@app.get("/tts/debug")
+def tts_debug():
+    folder = os.path.join(STATIC_DIR, "tts")
+    files = []
+    if os.path.isdir(folder):
+        for name in os.listdir(folder):
+            p = os.path.join(folder, name)
+            if os.path.isfile(p):
+                files.append({"name": name, "size": os.path.getsize(p)})
+    return {"files": files}
+
