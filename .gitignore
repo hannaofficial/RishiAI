@@ -1,0 +1,116 @@
+apps/web/.next/
+apps/web/node_modules/
+apps/web/dist/
+apps/web/build/
+
+# --------------------------------------------------
+# 🚫 GENERAL IGNORES
+# --------------------------------------------------
+*.log
+*.tmp
+*.swp
+.DS_Store
+Thumbs.db
+
+# Ignore environment files
+.env
+.env.*
+!.env.example  # allow this if you want to version sample env
+
+# Ignore local debug files
+*.local
+*.secret
+
+# --------------------------------------------------
+# 🚫 NODE / MONOREPO IGNORES
+# --------------------------------------------------
+node_modules/
+**/node_modules/
+
+# Yarn / pnpm / bun files
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+
+# --------------------------------------------------
+# 🚫 NEXT.JS & WEB BUILD FILES
+# --------------------------------------------------
+.next/
+**/.next/
+out/
+apps/web/.next/
+apps/web/out/
+apps/web/build/
+apps/web/dist/
+
+# --------------------------------------------------
+# 🚫 VITE / REACT / FRONTEND BUILDS
+# --------------------------------------------------
+dist/
+build/
+vite.config.*
+webpack.config.*
+rollup.config.*
+parcel-cache/
+
+# --------------------------------------------------
+# 🚫 TYPESCRIPT
+# --------------------------------------------------
+*.tsbuildinfo
+**/*.tsbuildinfo
+
+# --------------------------------------------------
+# 🚫 BACKEND / SERVER BUILDS (services/*)
+# --------------------------------------------------
+services/**/build/
+services/**/dist/
+services/**/.tsbuildinfo
+
+# --------------------------------------------------
+# 🚫 DATABASE / STORAGE
+# --------------------------------------------------
+*.sqlite
+*.db
+*.db-wal
+*.db-shm
+pgdata/
+data/
+storage/
+
+# --------------------------------------------------
+# 🚫 OS / EDITOR ARTIFACTS
+# --------------------------------------------------
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# VS Code
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# Jetbrains
+.idea/
+*.iml
+
+# --------------------------------------------------
+# 🚫 DOCKER
+# --------------------------------------------------
+docker-data/
+*.pid
+*.sock
+
+# --------------------------------------------------
+# ✅ keep tasks, remove cache
+# --------------------------------------------------
+.cache/
+tmp/
+temp/
+

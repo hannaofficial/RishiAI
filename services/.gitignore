@@ -1,0 +1,34 @@
+# Ignore Python cache files
+*.pyc
+*.pyo
+__pycache__/
+
+# Ignore virtual environment directories
+venv/
+ENV/
+.venv/
+
+# Ignore local environment files
+.env
+.env.*
+!.env.example
+
+# Ignore database files
+*.sqlite3
+*.db
+
+# Ignore Alembic migrations
+alembic/versions/*.pyc
+alembic/versions/__pycache__/
+
+# Ignore logs
+*.log
+*.tmp
+
+# Ignore static and generated files
+static/tts/
+
+# Ignore other unnecessary files
+*.swp
+.DS_Store
+Thumbs.db
