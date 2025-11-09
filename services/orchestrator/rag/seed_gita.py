@@ -1,7 +1,7 @@
 from .chroma_client import get_collection
 from .embedder import embed_texts
 
-# Minimal verses → enough for RAG demo
+# few verses for demo
 verses = [
     {
         "id": "gita-2-47",
