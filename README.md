@@ -1,9 +1,21 @@
 # 🌿 Rishi.AI — Calm Stories & Wise Guidance  
 *A 24-hour hackathon prototype*
 
-**Tagline:** Tell us what’s on your mind and the problem you are facing whether related to life decision , overthinking, stress or anxiety. Based on your problems We find a calming story from ancient text where through story we will try to help you understand the senerio so that you can get rid of that problem. and also you will have guide based on your way of thinking and interest to go deep dive into the root cause of your problem.All the knowledge will be taken from Indian ancient scripture.Our final goal would be to find the clarity in your life so that you take actions without overthink
-**Motto:** *Clarity over cleverness. Momentum over perfection.*
 
+## 🌺 Find Clarity Through Ancient Wisdom
+
+What’s weighing on your mind today — a tough life decision, endless overthinking, stress, or quiet anxiety you can’t put into words?
+
+Here, we listen — not just to your problems, but to the patterns beneath them. Once you share what you’re going through, we’ll find a story from the ancient Indian texts — the Upanishads, the Mahabharata, the Yoga Sutras, or timeless folk wisdom — that mirrors your experience.
+
+Through that story, you’ll begin to see your life from a new lens — one that brings peace, perspective, and understanding. You’ll not only find the message the rishis left behind, but also a guide tailored to your way of thinking and your path of growth — helping you dive deep into the root cause of your thoughts, emotions, and patterns.
+
+**Our purpose is simple yet profound:**
+✨ To help you find clarity.
+✨ To turn confusion into calm.
+✨ To help you act without overthinking — and live in alignment with your true self.
+
+Because sometimes, what you need isn’t advice — it’s a story that awakens the truth already within you. 🌿
 ---
 
 ## ✨ What is Rishi.AI?
