@@ -1,8 +1,8 @@
 # 🌿 Rishi.AI — Calm Stories & Wise Guidance  
 *A 24-hour hackathon prototype*
 
-> **Tagline:** Tell us what’s on your mind and the problem you are facing whether related to life decision , overthinking, stress or anxiety. Based on your problems We find a calming story from ancient text where through story we will try to help you understand the senerio so that you can get rid of that problem. and also you will have guide based on your way of thinking and interest to go deep dive into the root cause of your problem.All the knowledge will be taken from Indian ancient scripture.Our final goal would be to find the clarity in your life so that you take actions without overthink
-> **Motto:** *Clarity over cleverness. Momentum over perfection.*
+**Tagline:** Tell us what’s on your mind and the problem you are facing whether related to life decision , overthinking, stress or anxiety. Based on your problems We find a calming story from ancient text where through story we will try to help you understand the senerio so that you can get rid of that problem. and also you will have guide based on your way of thinking and interest to go deep dive into the root cause of your problem.All the knowledge will be taken from Indian ancient scripture.Our final goal would be to find the clarity in your life so that you take actions without overthink
+**Motto:** *Clarity over cleverness. Momentum over perfection.*
 
 ---
 
